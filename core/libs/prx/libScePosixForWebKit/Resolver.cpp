@@ -7,10 +7,15 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #endif
-#include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/General.hpp"
+#include "prx/libc/include/HostThreadLocal.hpp"
+#include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <string>
+#include <vector>
 #include "GuestResolver.hpp"
 
 namespace {
@@ -37,6 +42,18 @@ int GuestError(int error) {
     if (error == EAI_OVERFLOW) return 14;
 #endif
     return 4;
+}
+struct HostEntryTag {};
+constexpr std::size_t NumericNameLength = 1025;
+constexpr std::size_t NameLength = 255;
+bool Ipv6Literal(const char* name) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET6;
+    hints.ai_flags = AI_NUMERICHOST;
+    addrinfo* result = nullptr;
+    if (::getaddrinfo(name, nullptr, &hints, &result) != 0) return false;
+    ::freeaddrinfo(result);
+    return true;
 }
 }
 
@@ -167,6 +184,28 @@ int APS5_VABI getnameinfo_nid_postfix(const void* address, std::uint32_t length,
     if (wantHost) std::memcpy(host, resolvedHost, std::strlen(resolvedHost) + 1);
     if (wantService) std::memcpy(service, resolvedService, std::strlen(resolvedService) + 1);
     return 0;
+}
+
+GuestResolver::HostEntry* APS5_VABI gethostbyname_nid_postfix(const char* name) {
+    if (!name) APS5_INVALID_ARG_EX;
+    auto& storage = HostThreadLocal<GuestResolver::HostEntryStorage, HostEntryTag>();
+    const std::size_t length = std::strlen(name);
+    if (const auto address = GuestResolver::ParseIpv4(name))
+        return storage.Store(std::string(name, std::min(length, NumericNameLength)), {}, {*address});
+    if (length == 0 || length > NameLength || !Ready() || Ipv6Literal(name)) return nullptr;
+#ifdef _WIN32
+    const hostent* native = ::gethostbyname(name);
+    return native ? storage.StoreNative(*native, AF_INET) : nullptr;
+#else
+    hostent native{};
+    hostent* result = nullptr;
+    int error = 0;
+    std::vector<char> buffer(1024);
+    int status;
+    while ((status = ::gethostbyname_r(name, &native, buffer.data(), buffer.size(), &result, &error)) == ERANGE)
+        buffer.resize(buffer.size() * 2);
+    return status == 0 && result ? storage.StoreNative(*result, AF_INET) : nullptr;
+#endif
 }
 
 const char* APS5_VABI gai_strerror_nid_postfix(int error) {
